@@ -23,6 +23,7 @@ from kartothek.serialization import (
     filter_df_from_predicates,
     filter_predicates_by_column,
 )
+from kartothek.serialization._parquet import _fix_pyarrow_07992_table
 
 ValueType = TypeVar("ValueType")
 IndexDictType = Dict[ValueType, List[str]]
@@ -856,7 +857,8 @@ def _parquet_bytes_to_dict(column: str, index_buffer: bytes):
     if column_type == pa.timestamp("us"):
         column_type = pa.timestamp("ns")
 
-    df = table.to_pandas()
+    df = _fix_pyarrow_07992_table(table).to_pandas()  # Could eventually be phased out
+    # df = table.to_pandas()
 
     index_dct = dict(
         zip(df[column].values, (list(x) for x in df[_PARTITION_COLUMN_NAME].values))

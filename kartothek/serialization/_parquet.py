@@ -13,6 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pyarrow.parquet import ParquetFile
 
+from ._arrow_compat import _fix_pyarrow_07992_table
 from ._generic import (
     DataFrameSerializer,
     check_predicates,
@@ -37,7 +38,56 @@ EPOCH_ORDINAL = datetime.date(1970, 1, 1).toordinal()
 def _empty_table_from_schema(parquet_file):
     schema = parquet_file.schema.to_arrow_schema()
 
+    # ARROW-6872: empty dictionary columns raise ArrowNotImplementedError
+    for i in range(len(schema)):
+        field = schema[i]
+        if pa.types.is_dictionary(field.type):
+            new_field = pa.field(
+                field.name, field.type.value_type, field.nullable, field.metadata
+            )
+            schema = schema.remove(i).insert(i, new_field)
+
     return schema.empty_table()
+
+
+def _reset_dictionary_columns(table, exclude=None):
+    """
+    1. Categorical columns of null won't cast https://issues.apache.org/jira/browse/ARROW-5085
+    2. Massive performance issue due to non-fast path implementation https://issues.apache.org/jira/browse/ARROW-5089
+    3. We need to ensure that the dtype is exactly as requested, see GH227
+    """
+    """
+    if exclude is None:
+        exclude = []
+
+    if ARROW_LARGER_EQ_0150:
+        # https://issues.apache.org/jira/browse/ARROW-8142
+    """
+    if exclude is None:
+        exclude = []
+
+    # https://issues.apache.org/jira/browse/ARROW-8142
+    if len(table) == 0:
+        df = table.to_pandas(date_as_object=True)
+        new_types = {
+            col: df[col].cat.categories.dtype for col in df.select_dtypes("category")
+        }
+        if new_types:
+            df = df.astype(new_types)
+            table = pa.Table.from_pandas(df)
+    else:
+        schema = table.schema
+        for i in range(len(schema)):
+            field = schema[i]
+            if pa.types.is_dictionary(field.type):
+                new_field = pa.field(
+                    field.name, field.type.value_type, field.nullable, field.metadata,
+                )
+                schema = schema.remove(i).insert(i, new_field)
+
+        table = table.cast(schema)
+
+    return table
 
 
 class ParquetSerializer(DataFrameSerializer):
@@ -127,6 +177,8 @@ class ParquetSerializer(DataFrameSerializer):
             finally:
                 reader.close()
 
+        table = _fix_pyarrow_07992_table(table)
+
         if columns is not None:
             missing_columns = set(columns) - set(table.schema.names)
             if missing_columns:
@@ -135,6 +187,8 @@ class ParquetSerializer(DataFrameSerializer):
                         missing=", ".join(sorted(missing_columns))
                     )
                 )
+
+        table = _reset_dictionary_columns(table, exclude=categories)
 
         df = table.to_pandas(categories=categories, date_as_object=date_as_object)
         df.columns = df.columns.map(ensure_unicode_string_type)
